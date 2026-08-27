@@ -945,12 +945,31 @@ def _load():
     # grow patch_ib beyond this at runtime, but those entries are never in the namelist.
     _ib_tags = {"ib"}
     _ib_attrs: Dict[str, tuple] = {}
-    for a in ["geometry", "moving_ibm", "airfoil_id", "model_id", "inj_species"]:
+    for a in [
+        "geometry",
+        "moving_ibm",
+        "airfoil_id",
+        "model_id",
+        "inj_species",
+        "thermal_bc",
+        "species_bc",
+    ]:
         _ib_attrs[a] = (INT, _ib_tags)
-    for a, pt in [("radius", REAL), ("slip", LOG), ("mass", REAL), ("v_blow", REAL), ("burn_rate_exp", REAL), ("burn_rate_pref", REAL)]:
+    for a, pt in [
+        ("radius", REAL),
+        ("slip", LOG),
+        ("mass", REAL),
+        ("Twall", REAL),
+        ("v_blow", REAL),
+        ("burn_rate_exp", REAL),
+        ("burn_rate_pref", REAL),
+    ]:
         _ib_attrs[a] = (pt, _ib_tags)
     for j in range(1, 4):
         _ib_attrs[f"angles({j})"] = (REAL, _ib_tags)
+    # Prescribed wall species mass fractions
+    for j in range(1, 101):
+        _ib_attrs[f"Ywall({j})"] = (A_REAL, _ib_tags)
     for d in ["x", "y", "z"]:
         _ib_attrs[f"{d}_centroid"] = (REAL, _ib_tags)
         _ib_attrs[f"length_{d}"] = (REAL, _ib_tags)

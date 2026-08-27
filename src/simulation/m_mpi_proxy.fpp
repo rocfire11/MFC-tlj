@@ -168,6 +168,7 @@ contains
         do i = 1, num_ibs
             #:for VAR in [ 'radius', 'length_x', 'length_y', 'length_z', &
                 & 'x_centroid', 'y_centroid', 'z_centroid', 'slip', 'mass', 'v_blow', &
+                & 'Twall', &
                 & 'burn_rate_exp', 'burn_rate_pref']
                 call MPI_BCAST(patch_ib(i)%${VAR}$, 1, mpi_p, 0, MPI_COMM_WORLD, ierr)
             #:endfor
@@ -179,6 +180,11 @@ contains
             call MPI_BCAST(patch_ib(i)%airfoil_id, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
             call MPI_BCAST(patch_ib(i)%model_id, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
             call MPI_BCAST(patch_ib(i)%inj_species, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
+            call MPI_BCAST(patch_ib(i)%thermal_bc, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
+            call MPI_BCAST(patch_ib(i)%species_bc, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
+            if (chemistry) then
+                call MPI_BCAST(patch_ib(i)%Ywall, size(patch_ib(i)%Ywall), mpi_p, 0, MPI_COMM_WORLD, ierr)
+            end if
         end do
 
         ! manual: ib_airfoil (kept manual alongside patch_ib)

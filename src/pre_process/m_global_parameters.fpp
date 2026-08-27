@@ -339,6 +339,12 @@ contains
             patch_ib(i)%airfoil_id = 0
             patch_ib(i)%model_id = 0
             patch_ib(i)%slip = .false.
+
+            patch_ib(i)%thermal_bc = 0
+            patch_ib(i)%Twall = 0._wp
+            patch_ib(i)%species_bc = 0
+            patch_ib(i)%Ywall = 0._wp
+
             patch_ib(i)%v_blow = 0._wp
             patch_ib(i)%inj_species = 0
             patch_ib(i)%burn_rate_exp = 0._wp

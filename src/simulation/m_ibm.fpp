@@ -161,17 +161,18 @@ contains
             real(wp), dimension(3)  :: r_IP, v_IP, pb_IP, mv_IP
             real(wp), dimension(18) :: nmom_IP
             real(wp), dimension(12) :: presb_IP, massv_IP
-            real(wp), dimension(10) :: Ys_IP
+            real(wp), dimension(10) :: Ys_IP, Ys_g
         #:else
             real(wp), dimension(num_fluids)  :: Gs
             real(wp), dimension(num_fluids)  :: alpha_rho_IP, alpha_IP
             real(wp), dimension(nb)          :: r_IP, v_IP, pb_IP, mv_IP
             real(wp), dimension(nb*nmom)     :: nmom_IP
             real(wp), dimension(nb*nnode)    :: presb_IP, massv_IP
-            real(wp), dimension(num_species) :: Ys_IP
+            real(wp), dimension(num_species) :: Ys_IP, Ys_g
         #:endif
-        real(wp) :: T_IP, mw_IP, e_IP  !< Image-point temperature, mixture MW, and mass-specific internal energy (chemistry)
-        real(wp) :: v_blow_eff         !< Effective surface blowing speed (after any pressure-coupled burn-rate scaling)
+        !> Image-point temperature, ghost temperature, mixture IP and ghost MW, and mass-specific internal energy (chemistry)
+        real(wp) :: T_IP, T_g, mw_IP, mw_g, e_IP
+        real(wp) :: v_blow_eff  !< Effective surface blowing speed (after any pressure-coupled burn-rate scaling)
         ! Primitive variables at the image point associated with a ghost point, interpolated from surrounding fluid cells.
 
         real(wp), dimension(3) :: norm               !< Normal vector from GP to IP
@@ -222,7 +223,7 @@ contains
             $:GPU_PARALLEL_LOOP(private='[i, physical_loc, dyn_pres, alpha_rho_IP, alpha_IP, pres_IP, vel_IP, vel_g, vel_norm_IP, &
                                 & r_IP, v_IP, pb_IP, mv_IP, nmom_IP, presb_IP, massv_IP, rho, gamma, pi_inf, Re_K, G_K, Gs, gp, &
                                 & innerp, norm, buf, radial_vector, rotation_velocity, j, k, l, q, qv_K, c_IP, nbub, patch_id, &
-                                & Ys_IP, T_IP, mw_IP, e_IP, v_blow_eff]')
+                                & Ys_IP, Ys_g, T_IP, T_g, mw_IP, mw_g, e_IP, v_blow_eff]')
             do i = 1, num_gps
                 gp = ghost_points(i)
                 j = gp%loc(1)
@@ -264,6 +265,44 @@ contains
                     Ys_IP(patch_ib(patch_id)%inj_species) = 1._wp
                     call get_mixture_molecular_weight(Ys_IP, mw_IP)
                     alpha_rho_IP(1) = pres_IP*mw_IP/(T_IP*gas_constant)
+                end if
+
+                ! Species immersed-boundary condition for chemistry.
+                !
+                ! species_bc = 0:     passive/default treatment, Y_g = Y_IP
+                !
+                ! species_bc = 1:     prescribed wall composition using symmetric
+                !                     ghost/image-point reflection,
+                !         Y_g = 2*Ywall - Y_IP
+                ! so that the midpoint wall value is
+                !         Ywall = (Y_g + Y_IP)/2.
+                if (chemistry) then
+                    ! Default/passive ghost composition.
+                    Ys_g(:) = Ys_IP(:)
+
+                    if (patch_ib(patch_id)%species_bc == 1) then
+                        $:GPU_LOOP(parallelism='[seq]')
+                        do q = 1, num_species
+                            Ys_g(q) = 2._wp*patch_ib(patch_id)%Ywall(q) - Ys_IP(q)
+                        end do
+                    end if
+                end if
+
+                ! Thermal immersed-boundary condition for chemistry.
+                if (chemistry) then
+                    ! Image-point temperature must be calculated using the IMAGE-POINT composition.
+                    call get_mixture_molecular_weight(Ys_IP, mw_IP)
+
+                    T_IP = pres_IP*mw_IP/(alpha_rho_IP(1)*gas_constant)
+
+                    T_g = T_IP + 2._wp*real(patch_ib(patch_id)%thermal_bc, wp)*(patch_ib(patch_id)%Twall - T_IP)
+
+                    ! Ghost density must use the GHOST composition because its molecular weight can differ from that at the IP.
+                    call get_mixture_molecular_weight(Ys_g, mw_g)
+
+                    if (patch_ib(patch_id)%thermal_bc == 1 .or. patch_ib(patch_id)%species_bc == 1) then
+                        alpha_rho_IP(1) = pres_IP*mw_g/(T_g*gas_constant)
+                    end if
                 end if
 
                 dyn_pres = 0._wp
@@ -381,18 +420,14 @@ contains
 
                 ! Set Energy
                 if (chemistry) then
-                    ! Mirror the reacting-mixture state at the ghost point: interpolated species,
-                    ! plus a thermodynamically consistent conserved energy from the mixture EOS.
-                    ! (The gamma*pres_IP closure below is only valid for a calorically perfect gas
-                    ! and yields an out-of-range temperature when inverted against the Cantera model.)
-                    mw_IP = 0._wp
-                    call get_mixture_molecular_weight(Ys_IP, mw_IP)
-                    T_IP = pres_IP*mw_IP/(rho*gas_constant)
-                    call get_mixture_energy_mass(T_IP, Ys_IP, e_IP)
+                    ! Thermodynamic state at the ghost point uses the ghost composition and ghost temperature.
+                    call get_mixture_energy_mass(T_g, Ys_g, e_IP)
+
                     $:GPU_LOOP(parallelism='[seq]')
                     do q = 1, num_species
-                        q_cons_vf(eqn_idx%species%beg + q - 1)%sf(j, k, l) = rho*Ys_IP(q)
+                        q_cons_vf(eqn_idx%species%beg + q - 1)%sf(j, k, l) = rho*Ys_g(q)
                     end do
+
                     q_cons_vf(eqn_idx%E)%sf(j, k, l) = rho*e_IP + dyn_pres
                 else if (bubbles_euler) then
                     q_cons_vf(eqn_idx%E)%sf(j, k, l) = (1 - alpha_IP(1))*(gamma*pres_IP + pi_inf + dyn_pres)

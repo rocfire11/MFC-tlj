@@ -104,13 +104,35 @@ contains
     !> Validates that each burning immersed-boundary patch injects a species index within the mechanism. inj_species indexes the
     !! image-point mass-fraction array Ys_IP(1:num_species) in m_ibm; an out-of-range value is an out-of-bounds write (silent
     !! corruption). Only reachable with chemistry.
+    !> Validates immersed-boundary chemistry/surface parameters.
     impure subroutine s_check_inputs_ib_injection
 
-        integer :: i
+        integer :: i, j
 
         do i = 1, num_ibs
-            @:PROHIBIT(patch_ib(i)%inj_species > num_species, &
-                       & "patch_ib inj_species must be <= num_species (it indexes the image-point species mass fractions; an out-of-range value writes out of bounds)")
+            @:PROHIBIT(patch_ib(i)%inj_species < 0 .or. patch_ib(i)%inj_species > num_species, &
+                       & "patch_ib inj_species must be in [0,num_species]")
+
+            @:PROHIBIT(patch_ib(i)%thermal_bc < 0 .or. patch_ib(i)%thermal_bc > 1, "patch_ib thermal_bc must be 0 or 1")
+
+            @:PROHIBIT(patch_ib(i)%thermal_bc == 1 .and. patch_ib(i)%Twall <= 0._wp, &
+                       & "patch_ib Twall must be > 0 when thermal_bc = 1")
+
+            @:PROHIBIT(patch_ib(i)%species_bc < 0 .or. patch_ib(i)%species_bc > 1, "patch_ib species_bc must be 0 or 1")
+
+            @:PROHIBIT(patch_ib(i)%species_bc == 1 .and. patch_ib(i)%inj_species > 0, &
+                       & "patch_ib species_bc = 1 cannot be combined with inj_species > 0")
+
+            if (patch_ib(i)%species_bc == 1) then
+                @:PROHIBIT(.not. chemistry, "patch_ib species_bc = 1 requires chemistry = T")
+
+                do j = 1, num_species
+                    @:PROHIBIT(patch_ib(i)%Ywall(j) < 0._wp .or. patch_ib(i)%Ywall(j) > 1._wp, &
+                               & "patch_ib Ywall mass fractions must lie in [0,1]")
+                end do
+
+                @:PROHIBIT(abs(sum(patch_ib(i)%Ywall) - 1._wp) > 1.0e-10_wp, "patch_ib Ywall mass fractions must sum to 1")
+            end if
         end do
 
     end subroutine s_check_inputs_ib_injection
