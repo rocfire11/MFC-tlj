@@ -363,6 +363,7 @@ contains
         ! surface-condition fields must be initialized explicitly.
         particle_cloud_ibs(ib_idx)%thermal_bc = 0
         particle_cloud_ibs(ib_idx)%Twall = 0._wp
+        particle_cloud_ibs(ib_idx)%hwall = 0._wp
         particle_cloud_ibs(ib_idx)%species_bc = 0
         particle_cloud_ibs(ib_idx)%Ywall = 0._wp
         particle_cloud_ibs(ib_idx)%v_blow = 0._wp

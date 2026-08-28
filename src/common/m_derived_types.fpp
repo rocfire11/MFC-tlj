@@ -358,6 +358,7 @@ module m_derived_types
         ! Thermal immersed-boundary condition   0 = current/passive MFC treatment   1 = prescribed isothermal wall
         integer  :: thermal_bc
         real(wp) :: Twall
+        real(wp) :: hwall
 
         ! Species immersed-boundary condition   0 = passive/default surface   1 = prescribed wall composition
         integer :: species_bc

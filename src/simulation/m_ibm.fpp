@@ -21,7 +21,8 @@ module m_ibm
     use m_model
     use m_patch_geometries
     use m_collisions
-    use m_thermochem, only: num_species, gas_constant, get_mixture_molecular_weight, get_mixture_energy_mass
+    use m_thermochem, only: num_species, gas_constant, get_mixture_molecular_weight, get_mixture_energy_mass, &
+        & get_mixture_thermal_conductivity_mixavg
 
     implicit none
 
@@ -172,6 +173,7 @@ contains
         #:endif
         !> Image-point temperature, ghost temperature, mixture IP and ghost MW, and mass-specific internal energy (chemistry)
         real(wp) :: T_IP, T_g, mw_IP, mw_g, e_IP
+        real(wp) :: k_g, d, bc_T, beta_T
         real(wp) :: v_blow_eff  !< Effective surface blowing speed (after any pressure-coupled burn-rate scaling)
         ! Primitive variables at the image point associated with a ghost point, interpolated from surrounding fluid cells.
 
@@ -223,7 +225,7 @@ contains
             $:GPU_PARALLEL_LOOP(private='[i, physical_loc, dyn_pres, alpha_rho_IP, alpha_IP, pres_IP, vel_IP, vel_g, vel_norm_IP, &
                                 & r_IP, v_IP, pb_IP, mv_IP, nmom_IP, presb_IP, massv_IP, rho, gamma, pi_inf, Re_K, G_K, Gs, gp, &
                                 & innerp, norm, buf, radial_vector, rotation_velocity, j, k, l, q, qv_K, c_IP, nbub, patch_id, &
-                                & Ys_IP, Ys_g, T_IP, T_g, mw_IP, mw_g, e_IP, v_blow_eff]')
+                                & Ys_IP, Ys_g, T_IP, T_g, mw_IP, mw_g, e_IP, k_g, d, bc_T, beta_T, v_blow_eff]')
             do i = 1, num_gps
                 gp = ghost_points(i)
                 j = gp%loc(1)
@@ -254,54 +256,46 @@ contains
                     call s_interpolate_image_point(q_prim_vf, gp, alpha_rho_IP, alpha_IP, pres_IP, vel_IP, c_IP)
                 end if
 
-                ! Injecting (burning) surface: replace the mirrored ghost composition with pure
-                ! injected fuel at the local pressure and the ambient (image-point) temperature.
-                ! Setting a consistent injected density here (rather than reusing the heavy ambient
-                ! rho) keeps the light fuel at a physical temperature and feeds the surface flame.
-                if (chemistry .and. patch_ib(patch_id)%inj_species > 0) then
-                    call get_mixture_molecular_weight(Ys_IP, mw_IP)
-                    T_IP = pres_IP*mw_IP/(alpha_rho_IP(1)*gas_constant)
-                    Ys_IP = 0._wp
-                    Ys_IP(patch_ib(patch_id)%inj_species) = 1._wp
-                    call get_mixture_molecular_weight(Ys_IP, mw_IP)
-                    alpha_rho_IP(1) = pres_IP*mw_IP/(T_IP*gas_constant)
-                end if
-
-                ! Species immersed-boundary condition for chemistry.
-                !
-                ! species_bc = 0:     passive/default treatment, Y_g = Y_IP
-                !
-                ! species_bc = 1:     prescribed wall composition using symmetric
-                !                     ghost/image-point reflection,
-                !         Y_g = 2*Ywall - Y_IP
-                ! so that the midpoint wall value is
-                !         Ywall = (Y_g + Y_IP)/2.
                 if (chemistry) then
-                    ! Default/passive ghost composition.
-                    Ys_g(:) = Ys_IP(:)
+                    ! Injecting (burning) surface: replace the mirrored ghost composition with pure
+                    ! injected fuel at the local pressure and the ambient (image-point) temperature.
+                    ! Setting a consistent injected density here (rather than reusing the heavy ambient
+                    ! rho) keeps the light fuel at a physical temperature and feeds the surface flame.
+                    if (patch_ib(patch_id)%inj_species > 0) then
+                        call get_mixture_molecular_weight(Ys_IP, mw_IP)
+                        T_IP = pres_IP*mw_IP/(alpha_rho_IP(1)*gas_constant)
+                        Ys_IP = 0._wp
+                        Ys_IP(patch_ib(patch_id)%inj_species) = 1._wp
+                        call get_mixture_molecular_weight(Ys_IP, mw_IP)
+                        alpha_rho_IP(1) = pres_IP*mw_IP/(T_IP*gas_constant)
+                    end if
 
-                    if (patch_ib(patch_id)%species_bc == 1) then
+                    if (patch_ib(patch_id)%inj_species == 0) then
+                        ! Species BC species_bc = 0: zero flux (default value) species_bc = 1: Dirichlet
                         $:GPU_LOOP(parallelism='[seq]')
                         do q = 1, num_species
-                            Ys_g(q) = 2._wp*patch_ib(patch_id)%Ywall(q) - Ys_IP(q)
+                            Ys_g(q) = Ys_IP(q) + 2._wp*real(patch_ib(patch_id)%species_bc, &
+                                 & kind=wp)*(patch_ib(patch_id)%Ywall(q) - Ys_IP(q))
                         end do
-                    end if
-                end if
 
-                ! Thermal immersed-boundary condition for chemistry.
-                if (chemistry) then
-                    ! Image-point temperature must be calculated using the IMAGE-POINT composition.
-                    call get_mixture_molecular_weight(Ys_IP, mw_IP)
+                        ! Thermal BC thermal_bc = 0: adiabatic thermal_bc = 1: Dirichlet thermal_bc = 2: Robin
+                        call get_mixture_molecular_weight(Ys_IP, mw_IP)
+                        T_IP = pres_IP*mw_IP/(alpha_rho_IP(1)*gas_constant)
+                        call get_mixture_thermal_conductivity_mixavg(T_IP, Ys_IP, k_g)
 
-                    T_IP = pres_IP*mw_IP/(alpha_rho_IP(1)*gas_constant)
+                        d = abs(real(gp%levelset, kind=wp))
+                        bc_T = real(patch_ib(patch_id)%thermal_bc, kind=wp)
 
-                    T_g = T_IP + 2._wp*real(patch_ib(patch_id)%thermal_bc, wp)*(patch_ib(patch_id)%Twall - T_IP)
+                        beta_T = bc_T*(2._wp - bc_T) + 0.5_wp*bc_T*(bc_T - 1._wp)*patch_ib(patch_id)%hwall*d/(k_g &
+                                       & + patch_ib(patch_id)%hwall*d)
 
-                    ! Ghost density must use the GHOST composition because its molecular weight can differ from that at the IP.
-                    call get_mixture_molecular_weight(Ys_g, mw_g)
+                        T_g = T_IP + 2._wp*beta_T*(patch_ib(patch_id)%Twall - T_IP)
 
-                    if (patch_ib(patch_id)%thermal_bc == 1 .or. patch_ib(patch_id)%species_bc == 1) then
-                        alpha_rho_IP(1) = pres_IP*mw_g/(T_g*gas_constant)
+                        call get_mixture_molecular_weight(Ys_g, mw_g)
+
+                        if (patch_ib(patch_id)%thermal_bc >= 1 .or. patch_ib(patch_id)%species_bc == 1) then
+                            alpha_rho_IP(1) = pres_IP*mw_g/(T_g*gas_constant)
+                        end if
                     end if
                 end if
 

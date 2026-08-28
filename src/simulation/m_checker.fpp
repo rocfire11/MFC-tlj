@@ -113,10 +113,13 @@ contains
             @:PROHIBIT(patch_ib(i)%inj_species < 0 .or. patch_ib(i)%inj_species > num_species, &
                        & "patch_ib inj_species must be in [0,num_species]")
 
-            @:PROHIBIT(patch_ib(i)%thermal_bc < 0 .or. patch_ib(i)%thermal_bc > 1, "patch_ib thermal_bc must be 0 or 1")
+            @:PROHIBIT(patch_ib(i)%thermal_bc < 0 .or. patch_ib(i)%thermal_bc > 2, "patch_ib thermal_bc must be 0, 1, or 2")
 
-            @:PROHIBIT(patch_ib(i)%thermal_bc == 1 .and. patch_ib(i)%Twall <= 0._wp, &
-                       & "patch_ib Twall must be > 0 when thermal_bc = 1")
+            @:PROHIBIT(patch_ib(i)%thermal_bc >= 1 .and. patch_ib(i)%Twall <= 0._wp, &
+                       & "patch_ib Twall must be > 0 when thermal_bc = 1 or 2")
+
+            @:PROHIBIT(patch_ib(i)%thermal_bc == 2 .and. patch_ib(i)%hwall < 0._wp, &
+                       & "patch_ib hwall must be >= 0 when thermal_bc = 2")
 
             @:PROHIBIT(patch_ib(i)%species_bc < 0 .or. patch_ib(i)%species_bc > 1, "patch_ib species_bc must be 0 or 1")
 

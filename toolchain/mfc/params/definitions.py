@@ -960,6 +960,7 @@ def _load():
         ("slip", LOG),
         ("mass", REAL),
         ("Twall", REAL),
+        ("hwall", REAL),
         ("v_blow", REAL),
         ("burn_rate_exp", REAL),
         ("burn_rate_pref", REAL),
