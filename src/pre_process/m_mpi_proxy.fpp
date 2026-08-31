@@ -134,6 +134,7 @@ contains
             call MPI_BCAST(patch_ib(i)%inj_species, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
             call MPI_BCAST(patch_ib(i)%thermal_bc, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
             call MPI_BCAST(patch_ib(i)%species_bc, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
+            call MPI_BCAST(patch_ib(i)%surface_reaction, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
 
             if (chemistry) then
                 call MPI_BCAST(patch_ib(i)%Ywall, size(patch_ib(i)%Ywall), mpi_p, 0, MPI_COMM_WORLD, ierr)

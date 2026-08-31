@@ -1181,6 +1181,8 @@ When ``cyl_coord = 'T'`` is set in 2D the following constraints must be met:
 - `chem_params%%adap_substeps` (default `F`) makes each rank choose its α-QSS sub-step count per flow step from the largest chemical stiffness among its own cells: the count sits at `reaction_substeps` (the floor) in inert or burned gas and rises toward `reaction_substeps_max` (the ceiling) only across the reaction front. It uses no MPI collectives. When enabled, `reaction_substeps >= 1` and `reaction_substeps_max >= reaction_substeps` are required
 
 - `cantera_file` specifies the chemical mechanism file. If the file is part of the standard Cantera library, only the filename is required. Otherwise, the file must be located in the same directory as your `case.py` file
+- `surface_cantera_file`: Cantera mechanism file for heterogeneous surface chemistry.
+- `surface_phase`: Cantera interface phase name for heterogeneous surface chemistry.
 
 ### 18. Chemistry-Specific Boundary Conditions
 

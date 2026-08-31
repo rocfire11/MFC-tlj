@@ -21,8 +21,9 @@ module m_ibm
     use m_model
     use m_patch_geometries
     use m_collisions
-    use m_thermochem, only: num_species, gas_constant, get_mixture_molecular_weight, get_mixture_energy_mass, &
-        & get_mixture_thermal_conductivity_mixavg
+    use m_thermochem, only: num_species, gas_constant, molecular_weights, get_mixture_molecular_weight, get_mixture_energy_mass, &
+        & get_mixture_thermal_conductivity_mixavg, get_species_mass_diffusivities_mixavg
+    use m_surface_thermochem, only: get_surface_net_production_rates
 
     implicit none
 
@@ -175,6 +176,22 @@ contains
         real(wp) :: T_IP, T_g, mw_IP, mw_g, e_IP
         real(wp) :: k_g, d, bc_T, beta_T
         real(wp) :: v_blow_eff  !< Effective surface blowing speed (after any pressure-coupled burn-rate scaling)
+        ! Heterogeneous surface chemistry
+        real(wp) :: omega_s(num_species)
+        real(wp) :: mdot_s
+        real(wp) :: Ys_s(num_species)
+        real(wp) :: Xs_IP(num_species)
+        real(wp) :: Xs_s(num_species)
+        real(wp) :: D_s(num_species)
+        real(wp) :: B_s(num_species)
+        real(wp) :: G_s(num_species)
+        real(wp) :: Z_s(num_species)
+        real(wp) :: sum_BG
+        real(wp) :: mw_s
+        real(wp) :: rho_s
+        real(wp) :: T_s
+        logical  :: surface_converged
+        integer  :: surface_niter
         ! Primitive variables at the image point associated with a ghost point, interpolated from surrounding fluid cells.
 
         real(wp), dimension(3) :: norm               !< Normal vector from GP to IP
@@ -186,6 +203,7 @@ contains
         real(wp)               :: buf
         type(ghost_point)      :: gp
         type(ghost_point)      :: innerp
+        logical                :: bad_surface_ip
 
         ! set the Moving IBM interior conservative variables
         $:GPU_PARALLEL_LOOP(private='[i, j, k, patch_id, rho]', collapse=3)
@@ -271,29 +289,69 @@ contains
                     end if
 
                     if (patch_ib(patch_id)%inj_species == 0) then
-                        ! Species BC species_bc = 0: zero flux (default value) species_bc = 1: Dirichlet
-                        $:GPU_LOOP(parallelism='[seq]')
-                        do q = 1, num_species
-                            Ys_g(q) = Ys_IP(q) + 2._wp*real(patch_ib(patch_id)%species_bc, &
-                                 & kind=wp)*(patch_ib(patch_id)%Ywall(q) - Ys_IP(q))
-                        end do
+                        if (patch_ib(patch_id)%surface_reaction == 0) then
+                            ! Existing species BC
+                            do q = 1, num_species
+                                Ys_g(q) = Ys_IP(q) + 2._wp*real(patch_ib(patch_id)%species_bc, &
+                                     & kind=wp)*(patch_ib(patch_id)%Ywall(q) - Ys_IP(q))
+                            end do
 
-                        ! Thermal BC thermal_bc = 0: adiabatic thermal_bc = 1: Dirichlet thermal_bc = 2: Robin
-                        call get_mixture_molecular_weight(Ys_IP, mw_IP)
-                        T_IP = pres_IP*mw_IP/(alpha_rho_IP(1)*gas_constant)
-                        call get_mixture_thermal_conductivity_mixavg(T_IP, Ys_IP, k_g)
+                            ! Existing thermal BC
+                            call get_mixture_molecular_weight(Ys_IP, mw_IP)
+                            T_IP = pres_IP*mw_IP/(alpha_rho_IP(1)*gas_constant)
+                            call get_mixture_thermal_conductivity_mixavg(T_IP, Ys_IP, k_g)
 
-                        d = abs(real(gp%levelset, kind=wp))
-                        bc_T = real(patch_ib(patch_id)%thermal_bc, kind=wp)
+                            d = abs(real(gp%levelset, kind=wp))
+                            bc_T = real(patch_ib(patch_id)%thermal_bc, kind=wp)
 
-                        beta_T = bc_T*(2._wp - bc_T) + 0.5_wp*bc_T*(bc_T - 1._wp)*patch_ib(patch_id)%hwall*d/(k_g &
-                                       & + patch_ib(patch_id)%hwall*d)
+                            beta_T = bc_T*(2._wp - bc_T) + 0.5_wp*bc_T*(bc_T - 1._wp)*patch_ib(patch_id)%hwall*d/(k_g &
+                                           & + patch_ib(patch_id)%hwall*d)
 
-                        T_g = T_IP + 2._wp*beta_T*(patch_ib(patch_id)%Twall - T_IP)
+                            T_g = T_IP + 2._wp*beta_T*(patch_ib(patch_id)%Twall - T_IP)
 
-                        call get_mixture_molecular_weight(Ys_g, mw_g)
+                            call get_mixture_molecular_weight(Ys_g, mw_g)
 
-                        if (patch_ib(patch_id)%thermal_bc >= 1 .or. patch_ib(patch_id)%species_bc == 1) then
+                            if (patch_ib(patch_id)%thermal_bc >= 1 .or. patch_ib(patch_id)%species_bc == 1) then
+                                alpha_rho_IP(1) = pres_IP*mw_g/(T_g*gas_constant)
+                            end if
+                        else
+                            ! Heterogeneous surface chemistry with fixed wall temperature
+                            !
+                            ! The generated surface-chemistry module returns gas-species
+                            ! molar production fluxes in the same species ordering used by
+                            ! m_thermochem:
+                            !
+                            !     omega_s(k) [kmol/(m^2 s)]
+                            !
+                            ! The corresponding total mass flux entering the gas is
+                            !
+                            !     mdot_s = sum_k W_k*omega_s(k)
+                            !
+                            ! with mdot_s [kg/(m^2 s)].
+
+                            call get_mixture_molecular_weight(Ys_IP, mw_IP)
+                            T_IP = pres_IP*mw_IP/(alpha_rho_IP(1)*gas_constant)
+
+                            T_s = patch_ib(patch_id)%Twall
+
+                            d = abs(real(gp%levelset, kind=wp))
+
+                            call s_solve_surface_species(pres_IP, T_s, d, Ys_IP, Ys_s, omega_s, mdot_s, surface_converged, &
+                                                         & surface_niter)
+                            if (.not. surface_converged) then
+                                print *, "Surface Newton failed:", " niter =", surface_niter, " d =", d, " mdot_s =", mdot_s
+                            end if
+
+                            ! Heterogeneous species boundary condition
+                            Ys_g(:) = 2._wp*Ys_s(:) - Ys_IP(:)
+
+                            ! Fixed-temperature carbon surface
+                            T_g = 2._wp*T_s - T_IP
+
+                            ! Update mixture molecular weights
+                            call get_mixture_molecular_weight(Ys_g, mw_g)
+
+                            ! Thermodynamically consistent ghost density
                             alpha_rho_IP(1) = pres_IP*mw_g/(T_g*gas_constant)
                         end if
                     end if
@@ -1629,5 +1687,306 @@ contains
 #endif
 
     end subroutine s_finalize_ibm_module
+
+    subroutine s_surface_species_residual(pres, T_s, d, Ys_IP, Ys_s, Z_s, omega_s, mdot_s)
+
+        real(wp), intent(in)  :: pres
+        real(wp), intent(in)  :: T_s
+        real(wp), intent(in)  :: d
+        real(wp), intent(in)  :: Ys_IP(num_species)
+        real(wp), intent(in)  :: Ys_s(num_species)
+        real(wp), intent(out) :: Z_s(num_species)
+        real(wp), intent(out) :: omega_s(num_species)
+        real(wp), intent(out) :: mdot_s
+        real(wp)              :: mw_IP, mw_s
+        real(wp)              :: rho_s
+        real(wp)              :: Xs_IP(num_species)
+        real(wp)              :: Xs_s(num_species)
+        real(wp)              :: D_s(num_species)
+        real(wp)              :: B_s(num_species)
+        real(wp)              :: G_s(num_species)
+        real(wp)              :: sum_BG
+        integer               :: k
+
+        call get_mixture_molecular_weight(Ys_IP, mw_IP)
+        call get_mixture_molecular_weight(Ys_s, mw_s)
+
+        rho_s = pres*mw_s/(gas_constant*T_s)
+
+        do k = 1, num_species
+            Xs_IP(k) = Ys_IP(k)*mw_IP/molecular_weights(k)
+            Xs_s(k) = Ys_s(k)*mw_s/molecular_weights(k)
+        end do
+
+        call get_species_mass_diffusivities_mixavg(pres, T_s, Ys_s, D_s)
+
+        call get_surface_net_production_rates(rho_s, T_s, Ys_s, omega_s)
+
+        mdot_s = 0._wp
+        do k = 1, num_species
+            mdot_s = mdot_s + molecular_weights(k)*omega_s(k)
+        end do
+
+        sum_BG = 0._wp
+
+        do k = 1, num_species
+            B_s(k) = rho_s*D_s(k)*molecular_weights(k)/mw_s
+            G_s(k) = (Xs_IP(k) - Xs_s(k))/d
+            sum_BG = sum_BG + B_s(k)*G_s(k)
+        end do
+
+        do k = 1, num_species
+            Z_s(k) = -B_s(k)*G_s(k) + Ys_s(k)*(sum_BG + mdot_s) - molecular_weights(k)*omega_s(k)
+        end do
+
+    end subroutine s_surface_species_residual
+
+    subroutine s_solve_linear_system(A, b, x, n, success)
+
+        integer, intent(in)     :: n
+        real(wp), intent(inout) :: A(n, n)
+        real(wp), intent(inout) :: b(n)
+        real(wp), intent(out)   :: x(n)
+        logical, intent(out)    :: success
+        integer                 :: i, j, k, pivot
+        real(wp)                :: maxval_A, factor, temp
+        real(wp)                :: row_tmp(n)
+
+        success = .true.
+        x = 0._wp
+
+        do k = 1, n - 1
+            pivot = k
+            maxval_A = abs(A(k, k))
+
+            do i = k + 1, n
+                if (abs(A(i, k)) > maxval_A) then
+                    maxval_A = abs(A(i, k))
+                    pivot = i
+                end if
+            end do
+
+            if (maxval_A <= epsilon(1._wp)) then
+                success = .false.
+                return
+            end if
+
+            if (pivot /= k) then
+                row_tmp(:) = A(k,:)
+                A(k,:) = A(pivot,:)
+                A(pivot,:) = row_tmp(:)
+
+                temp = b(k)
+                b(k) = b(pivot)
+                b(pivot) = temp
+            end if
+
+            do i = k + 1, n
+                factor = A(i, k)/A(k, k)
+                A(i, k) = 0._wp
+
+                do j = k + 1, n
+                    A(i, j) = A(i, j) - factor*A(k, j)
+                end do
+
+                b(i) = b(i) - factor*b(k)
+            end do
+        end do
+
+        if (abs(A(n, n)) <= epsilon(1._wp)) then
+            success = .false.
+            return
+        end if
+
+        x(n) = b(n)/A(n, n)
+
+        do i = n - 1, 1, -1
+            temp = b(i)
+
+            do j = i + 1, n
+                temp = temp - A(i, j)*x(j)
+            end do
+
+            if (abs(A(i, i)) <= epsilon(1._wp)) then
+                success = .false.
+                return
+            end if
+
+            x(i) = temp/A(i, i)
+        end do
+
+    end subroutine s_solve_linear_system
+
+    subroutine s_solve_surface_species(pres, T_s, d, Ys_IP, Ys_s, omega_s, mdot_s, converged, niter)
+
+        real(wp), intent(in)  :: pres
+        real(wp), intent(in)  :: T_s
+        real(wp), intent(in)  :: d
+        real(wp), intent(in)  :: Ys_IP(num_species)
+        real(wp), intent(out) :: Ys_s(num_species)
+        real(wp), intent(out) :: omega_s(num_species)
+        real(wp), intent(out) :: mdot_s
+        logical, intent(out)  :: converged
+        integer, intent(out)  :: niter
+        integer, parameter    :: max_iter = 20
+        integer, parameter    :: max_backtrack = 12
+        real(wp), parameter   :: tol = 1.e-10_wp
+        real(wp), parameter   :: fd_eps = 1.e-7_wp
+        real(wp), parameter   :: min_Y = 1.e-14_wp
+        integer               :: i, j, iter, iback
+        integer               :: nsolve
+        real(wp)              :: Z_s(num_species)
+        real(wp)              :: Z_pert(num_species)
+        real(wp)              :: Z_trial(num_species)
+        real(wp)              :: omega_pert(num_species)
+        real(wp)              :: omega_trial(num_species)
+        real(wp)              :: Ys_pert(num_species)
+        real(wp)              :: Ys_trial(num_species)
+        real(wp)              :: Jacobian(num_species - 1, num_species - 1)
+        real(wp)              :: A(num_species - 1, num_species - 1)
+        real(wp)              :: rhs(num_species - 1)
+        real(wp)              :: delta(num_species - 1)
+        real(wp)              :: mdot_pert
+        real(wp)              :: mdot_trial
+        real(wp)              :: perturb
+        real(wp)              :: lambda
+        real(wp)              :: norm_Z
+        real(wp)              :: norm_trial
+        logical               :: linear_success
+        logical               :: physical_trial
+
+        nsolve = num_species - 1
+        converged = .false.
+        niter = 0
+
+        Ys_s(:) = Ys_IP(:)
+
+        call s_surface_species_residual(pres, T_s, d, Ys_IP, Ys_s, Z_s, omega_s, mdot_s)
+        if (any(Z_s /= Z_s) .or. any(omega_s /= omega_s) .or. mdot_s /= mdot_s) then
+            print *, "Surface Newton base-state NaN"
+            print *, "d       =", d
+            print *, "pres    =", pres
+            print *, "T_s     =", T_s
+            print *, "Ys_IP   =", Ys_IP
+            print *, "Ys_s    =", Ys_s
+            print *, "omega_s =", omega_s
+            print *, "mdot_s  =", mdot_s
+            return
+        end if
+
+        norm_Z = maxval(abs(Z_s(1:nsolve)))
+
+        if (norm_Z < tol) then
+            converged = .true.
+            return
+        end if
+
+        do iter = 1, max_iter
+            niter = iter
+            do j = 1, nsolve
+                Ys_pert(:) = Ys_s(:)
+
+                perturb = fd_eps*max(abs(Ys_s(j)), 1._wp)
+
+                Ys_pert(j) = Ys_pert(j) + perturb
+
+                Ys_pert(num_species) = 1._wp - sum(Ys_pert(1:nsolve))
+
+                if (Ys_pert(num_species) <= min_Y) then
+                    perturb = -perturb
+                    Ys_pert(:) = Ys_s(:)
+                    Ys_pert(j) = Ys_pert(j) + perturb
+                    Ys_pert(num_species) = 1._wp - sum(Ys_pert(1:nsolve))
+                end if
+
+                call s_surface_species_residual(pres, T_s, d, Ys_IP, Ys_pert, Z_pert, omega_pert, mdot_pert)
+                if (any(Z_pert /= Z_pert) .or. any(omega_pert /= omega_pert) .or. mdot_pert /= mdot_pert) then
+                    print *, "Surface Newton perturbed-state NaN"
+                    print *, "species =", j
+                    print *, "perturb =", perturb
+                    print *, "Ys_s    =", Ys_s
+                    print *, "Ys_pert =", Ys_pert
+                    print *, "Z_s     =", Z_s
+                    print *, "omega_s =", omega_s
+                    print *, "mdot_s  =", mdot_s
+                    return
+                end if
+
+                do i = 1, nsolve
+                    Jacobian(i, j) = (Z_pert(i) - Z_s(i))/perturb
+                end do
+            end do
+
+            A(:,:) = Jacobian(:,:)
+
+            do i = 1, nsolve
+                rhs(i) = -Z_s(i)
+            end do
+
+            call s_solve_linear_system(A, rhs, delta, nsolve, linear_success)
+
+            if (.not. linear_success) then
+                print *, "Surface Newton: linear solve failed"
+                print *, "niter  =", niter
+                print *, "Ys_IP  =", Ys_IP
+                print *, "Ys_s   =", Ys_s
+                print *, "Z_s    =", Z_s
+                print *, "norm_Z =", norm_Z
+                error stop "Intentional stop: surface Newton linear solve failure"
+            end if
+
+            lambda = 1._wp
+
+            do iback = 1, max_backtrack
+                Ys_trial = Ys_s
+
+                do i = 1, nsolve
+                    Ys_trial(i) = Ys_trial(i) + lambda*delta(i)
+
+                    ! Remove tiny negative values caused only by Newton roundoff.
+                    if (Ys_trial(i) < 0._wp .and. Ys_trial(i) > -min_Y) then
+                        Ys_trial(i) = 0._wp
+                    end if
+                end do
+
+                Ys_trial(num_species) = 1._wp - sum(Ys_trial(1:nsolve))
+
+                physical_trial = all(Ys_trial(:) >= 0._wp) .and. all(Ys_trial(:) <= 1._wp)
+
+                if (physical_trial) then
+                    call s_surface_species_residual(pres, T_s, d, Ys_IP, Ys_trial, Z_trial, omega_trial, mdot_trial)
+
+                    norm_trial = maxval(abs(Z_trial(1:nsolve)))
+
+                    if (norm_trial < norm_Z) exit
+                end if
+
+                lambda = 0.5_wp*lambda
+            end do
+
+            if (iback > max_backtrack) then
+                print *, "Surface Newton: backtracking failed"
+                print *, "niter  =", niter
+                print *, "Ys_IP  =", Ys_IP
+                print *, "Ys_s   =", Ys_s
+                print *, "delta  =", delta
+                print *, "norm_Z =", norm_Z
+                error stop "Intentional stop: surface Newton backtracking failure"
+            end if
+
+            Ys_s(:) = Ys_trial(:)
+            Z_s(:) = Z_trial(:)
+            omega_s(:) = omega_trial(:)
+            mdot_s = mdot_trial
+
+            norm_Z = norm_trial
+
+            if (norm_Z < tol) then
+                converged = .true.
+                return
+            end if
+        end do
+
+    end subroutine s_solve_surface_species
 
 end module m_ibm

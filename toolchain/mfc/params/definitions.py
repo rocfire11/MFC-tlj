@@ -646,6 +646,8 @@ def _load():
 
     # Chemistry
     _r("cantera_file", STR, {"chemistry"})
+    _r("surface_cantera_file", STR, {"chemistry"})
+    _r("surface_phase", STR, {"chemistry"})
     _r("chemistry", LOG, {"chemistry"})
 
     # Condensed-phase reactive burn (programmed pressure burn on the multi-fluid model)
@@ -953,6 +955,7 @@ def _load():
         "inj_species",
         "thermal_bc",
         "species_bc",
+        "surface_reaction",
     ]:
         _ib_attrs[a] = (INT, _ib_tags)
     for a, pt in [

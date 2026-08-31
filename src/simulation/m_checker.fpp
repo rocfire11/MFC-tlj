@@ -136,6 +136,18 @@ contains
 
                 @:PROHIBIT(abs(sum(patch_ib(i)%Ywall) - 1._wp) > 1.0e-10_wp, "patch_ib Ywall mass fractions must sum to 1")
             end if
+
+            @:PROHIBIT(patch_ib(i)%surface_reaction < 0 .or. patch_ib(i)%surface_reaction > 1, &
+                       & "patch_ib surface_reaction must be 0 or 1")
+
+            @:PROHIBIT(patch_ib(i)%surface_reaction == 1 .and. .not. chemistry, &
+                       & "patch_ib surface_reaction = 1 requires chemistry = T")
+
+            @:PROHIBIT(patch_ib(i)%surface_reaction == 1 .and. patch_ib(i)%inj_species > 0, &
+                       & "patch_ib surface_reaction = 1 cannot be combined with inj_species > 0")
+
+            @:PROHIBIT(patch_ib(i)%surface_reaction == 1 .and. patch_ib(i)%species_bc /= 0, &
+                       & "patch_ib surface_reaction = 1 requires species_bc = 0")
         end do
 
     end subroutine s_check_inputs_ib_injection

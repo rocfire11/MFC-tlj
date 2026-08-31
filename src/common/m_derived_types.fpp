@@ -355,14 +355,20 @@ module m_derived_types
         real(wp)                     :: radius                        !< Dimensions of the patch. radius.
         logical                      :: slip
 
-        ! Thermal immersed-boundary condition   0 = current/passive MFC treatment   1 = prescribed isothermal wall
+        ! Thermal immersed-boundary condition
+        !    0 = adiabatic
+        !    1 = prescribed wall temperature
+        !    2 = finite-conductance Robin condition
         integer  :: thermal_bc
         real(wp) :: Twall
         real(wp) :: hwall
 
-        ! Species immersed-boundary condition   0 = passive/default surface   1 = prescribed wall composition
-        integer :: species_bc
+        ! Species immersed-boundary condition    0 = non-catalytic / zero species flux    1 = prescribed wall composition
+        integer  :: species_bc
         real(wp) :: Ywall(1:num_species)
+
+        ! Heterogeneous surface reaction    0 = none
+        integer :: surface_reaction
         integer :: moving_ibm  !< 0 for no moving, 1 for moving, 2 for moving on forced path
         real(wp) :: v_blow  !< Wall-normal surface blowing speed (burning/transpiring IB surface); 0 = impermeable
         integer :: inj_species  !< Injected species index at a blowing surface (chemistry); 0 = mirror ambient
