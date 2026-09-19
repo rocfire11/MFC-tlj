@@ -35,7 +35,11 @@ dependencies = [
 
     # Chemistry
     "cantera>=3.1.0",
-    "pyrometheus == 1.1.1",  # ==1.1.1 for get_creation_destruction_rates; also provides pyrometheus.flamelets (mixing-layer examples)
+    # Surface (heterogeneous) kinetics generation is not in a release yet; this
+    # tracks pyrometheus/pyrometheus#118 until it lands. The pin is still
+    # needed for get_creation_destruction_rates and pyrometheus.flamelets
+    # (mixing-layer examples).
+    "pyrometheus @ git+https://github.com/pyrometheus/pyrometheus.git@surface-kinetics",
     "jax",  # flamelet IC solve in the reacting mixing-layer examples (via pyrometheus.flamelets)
     "scipy",  # flamelet IC interpolation (scipy.interpolate) in the reacting mixing-layer examples
 
